@@ -38,7 +38,7 @@ import {
   shouldUsePlaywrightForScreenshot,
 } from "./agent.snapshot.plan.js";
 import type { BrowserResponse, BrowserRouteRegistrar } from "./types.js";
-import { jsonError, toBoolean, toStringOrEmpty } from "./utils.js";
+import { jsonError, toBoolean, toNumber, toStringOrEmpty } from "./utils.js";
 
 const CHROME_MCP_OVERLAY_ATTR = "data-openclaw-mcp-overlay";
 
@@ -301,6 +301,7 @@ export function registerBrowserAgentSnapshotRoutes(
     const ref = toStringOrEmpty(body.ref) || undefined;
     const element = toStringOrEmpty(body.element) || undefined;
     const type = body.type === "jpeg" ? "jpeg" : "png";
+    const timeoutMs = toNumber(body.timeoutMs);
 
     if (fullPage && (ref || element)) {
       return jsonError(res, 400, "fullPage is not supported for element screenshots");
@@ -356,6 +357,7 @@ export function registerBrowserAgentSnapshotRoutes(
             element,
             fullPage,
             type,
+            timeoutMs: timeoutMs ?? undefined,
           });
           buffer = snap.buffer;
         } else {
@@ -485,6 +487,7 @@ export function registerBrowserAgentSnapshotRoutes(
         const roleSnapshotArgs = {
           cdpUrl: profileCtx.profile.cdpUrl,
           targetId: tab.targetId,
+          timeoutMs: plan.timeoutMs ?? undefined,
           selector: plan.selectorValue,
           frameSelector: plan.frameSelectorValue,
           refsMode: plan.refsMode,
@@ -501,6 +504,7 @@ export function registerBrowserAgentSnapshotRoutes(
               .snapshotAiViaPlaywright({
                 cdpUrl: profileCtx.profile.cdpUrl,
                 targetId: tab.targetId,
+                timeoutMs: plan.timeoutMs ?? undefined,
                 ...(typeof plan.resolvedMaxChars === "number"
                   ? { maxChars: plan.resolvedMaxChars }
                   : {}),

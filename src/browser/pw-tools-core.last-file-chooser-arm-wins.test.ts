@@ -4,11 +4,13 @@ import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_UPLOAD_DIR } from "./paths.js";
 import {
+  getPwToolsCoreSessionMocks,
   installPwToolsCoreTestHooks,
   setPwToolsCoreCurrentPage,
 } from "./pw-tools-core.test-harness.js";
 
 installPwToolsCoreTestHooks();
+const sessionMocks = getPwToolsCoreSessionMocks();
 const mod = await import("./pw-tools-core.js");
 
 describe("pw-tools-core", () => {
@@ -148,6 +150,41 @@ describe("pw-tools-core", () => {
     });
     expect(waitForFunction).toHaveBeenCalledWith("window.ready===true", {
       timeout: 1234,
+    });
+  });
+  it("retries wait after a disconnected-page error", async () => {
+    const waitForSelector = vi
+      .fn<(...args: unknown[]) => Promise<void>>()
+      .mockRejectedValueOnce(new Error("Session closed. Most likely the page has been closed"))
+      .mockResolvedValueOnce(undefined);
+    const page = {
+      locator: vi.fn(() => ({
+        first: () => ({ waitFor: waitForSelector }),
+      })),
+      waitForTimeout: vi.fn(async () => {}),
+      waitForURL: vi.fn(async () => {}),
+      waitForLoadState: vi.fn(async () => {}),
+      waitForFunction: vi.fn(async () => {}),
+      getByText: vi.fn(() => ({ first: () => ({ waitFor: vi.fn() }) })),
+    };
+    setPwToolsCoreCurrentPage(page);
+
+    await mod.waitForViaPlaywright({
+      cdpUrl: "http://127.0.0.1:18792",
+      targetId: "T1",
+      selector: "#done",
+    });
+
+    expect(sessionMocks.getPageForTargetId).toHaveBeenCalledTimes(2);
+    expect(sessionMocks.forceDisconnectPlaywrightForTarget).toHaveBeenCalledWith({
+      cdpUrl: "http://127.0.0.1:18792",
+      targetId: "T1",
+      reason: "retry wait after disconnected page",
+    });
+    expect(waitForSelector).toHaveBeenCalledTimes(2);
+    expect(waitForSelector).toHaveBeenLastCalledWith({
+      state: "visible",
+      timeout: 30000,
     });
   });
 });

@@ -517,6 +517,10 @@ export function createBrowserTool(opts?: {
           const ref = readStringParam(params, "ref");
           const element = readStringParam(params, "element");
           const type = params.type === "jpeg" ? "jpeg" : "png";
+          const timeoutMs =
+            typeof params.timeoutMs === "number" && Number.isFinite(params.timeoutMs)
+              ? Math.floor(params.timeoutMs)
+              : undefined;
           const result = proxyRequest
             ? ((await proxyRequest({
                 method: "POST",
@@ -528,7 +532,9 @@ export function createBrowserTool(opts?: {
                   ref,
                   element,
                   type,
+                  timeoutMs,
                 },
+                timeoutMs: timeoutMs ?? undefined,
               })) as Awaited<ReturnType<typeof browserScreenshotAction>>)
             : await browserScreenshotAction(baseUrl, {
                 targetId,
@@ -536,6 +542,7 @@ export function createBrowserTool(opts?: {
                 ref,
                 element,
                 type,
+                timeoutMs,
                 profile,
               });
           return await imageResultFromFile({
