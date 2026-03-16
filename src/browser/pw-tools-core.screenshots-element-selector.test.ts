@@ -46,7 +46,7 @@ describe("pw-tools-core", () => {
     expect(res.buffer.toString()).toBe("E");
     expect(sessionMocks.getPageForTargetId).toHaveBeenCalled();
     expect(page.locator as ReturnType<typeof vi.fn>).toHaveBeenCalledWith("#main");
-    expect(elementScreenshot).toHaveBeenCalledWith({ type: "png" });
+    expect(elementScreenshot).toHaveBeenCalledWith({ type: "png", timeout: 30000 });
   });
   it("screenshots a ref locator", async () => {
     const refScreenshot = vi.fn(async () => Buffer.from("R"));
@@ -66,7 +66,37 @@ describe("pw-tools-core", () => {
 
     expect(res.buffer.toString()).toBe("R");
     expect(sessionMocks.refLocator).toHaveBeenCalledWith(page, "76");
-    expect(refScreenshot).toHaveBeenCalledWith({ type: "jpeg" });
+    expect(refScreenshot).toHaveBeenCalledWith({ type: "jpeg", timeout: 30000 });
+  });
+  it("retries page screenshots after a disconnected-page error", async () => {
+    const screenshot = vi
+      .fn<(...args: unknown[]) => Promise<Buffer>>()
+      .mockRejectedValueOnce(new Error("Target page, context or browser has been closed"))
+      .mockResolvedValueOnce(Buffer.from("P"));
+    setPwToolsCoreCurrentPage({
+      screenshot,
+    });
+
+    const res = await mod.takeScreenshotViaPlaywright({
+      cdpUrl: "http://127.0.0.1:18792",
+      targetId: "T1",
+      fullPage: true,
+      type: "png",
+    });
+
+    expect(res.buffer.toString()).toBe("P");
+    expect(sessionMocks.getPageForTargetId).toHaveBeenCalledTimes(2);
+    expect(sessionMocks.forceDisconnectPlaywrightForTarget).toHaveBeenCalledWith({
+      cdpUrl: "http://127.0.0.1:18792",
+      targetId: "T1",
+      reason: "retry screenshot after disconnected page",
+    });
+    expect(screenshot).toHaveBeenCalledTimes(2);
+    expect(screenshot).toHaveBeenLastCalledWith({
+      type: "png",
+      fullPage: true,
+      timeout: 30000,
+    });
   });
   it("rejects fullPage for element or ref screenshots", async () => {
     setPwToolsCoreCurrentRefLocator({ screenshot: vi.fn(async () => Buffer.from("R")) });

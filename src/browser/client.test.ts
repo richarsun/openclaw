@@ -101,6 +101,63 @@ describe("browser client", () => {
     expect(parsed.searchParams.get("refs")).toBe("aria");
   });
 
+  it("uses longer fetch budgets for Gemini-like snapshot, screenshot, and wait flows", async () => {
+    const calls: Array<{ url: string; init?: RequestInit & { timeoutMs?: number } }> = [];
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit & { timeoutMs?: number }) => {
+        calls.push({ url, init });
+        if (url.includes("/snapshot?")) {
+          return {
+            ok: true,
+            json: async () => ({
+              ok: true,
+              format: "ai",
+              targetId: "t1",
+              url: "https://x",
+              snapshot: "ok",
+            }),
+          } as unknown as Response;
+        }
+        if (url.endsWith("/screenshot")) {
+          return {
+            ok: true,
+            json: async () => ({
+              ok: true,
+              path: "/tmp/a.png",
+              targetId: "t1",
+              url: "https://x",
+            }),
+          } as unknown as Response;
+        }
+        if (url.endsWith("/act")) {
+          return {
+            ok: true,
+            json: async () => ({
+              ok: true,
+              targetId: "t1",
+              url: "https://x",
+            }),
+          } as unknown as Response;
+        }
+        throw new Error(`unexpected url: ${url}`);
+      }),
+    );
+
+    await browserSnapshot("http://127.0.0.1:18791", { format: "ai" });
+    await browserScreenshotAction("http://127.0.0.1:18791", { fullPage: true });
+    await browserAct("http://127.0.0.1:18791", { kind: "wait", selector: "#done" });
+
+    const snapshotCall = calls.find((call) => call.url.includes("/snapshot?"));
+    const screenshotCall = calls.find((call) => call.url.endsWith("/screenshot"));
+    const actCall = calls.find((call) => call.url.endsWith("/act"));
+
+    expect(snapshotCall?.init?.timeoutMs).toBe(40000);
+    expect(screenshotCall?.init?.timeoutMs).toBe(40000);
+    expect(actCall?.init?.timeoutMs).toBe(40000);
+  });
+
   it("omits format when the caller wants server-side snapshot capability defaults", async () => {
     const calls: string[] = [];
     stubSnapshotFetch(calls);

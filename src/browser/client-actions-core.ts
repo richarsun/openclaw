@@ -110,6 +110,21 @@ export type BrowserDownloadPayload = {
 
 type BrowserDownloadResult = { ok: true; targetId: string; download: BrowserDownloadPayload };
 
+function resolveBrowserActFetchTimeoutMs(req: BrowserActRequest): number {
+  const timeoutMsRaw = "timeoutMs" in req ? req.timeoutMs : undefined;
+  const requestedTimeoutMs =
+    typeof timeoutMsRaw === "number" && Number.isFinite(timeoutMsRaw)
+      ? Math.max(500, Math.min(120_000, Math.floor(timeoutMsRaw)))
+      : undefined;
+  if (requestedTimeoutMs !== undefined) {
+    return Math.max(1000, Math.min(120_000, requestedTimeoutMs + 5000));
+  }
+  if (req.kind === "wait") {
+    return 40_000;
+  }
+  return 20_000;
+}
+
 async function postDownloadRequest(
   baseUrl: string | undefined,
   route: "/wait/download" | "/download",
@@ -248,7 +263,7 @@ export async function browserAct(
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(req),
-    timeoutMs: 20000,
+    timeoutMs: resolveBrowserActFetchTimeoutMs(req),
   });
 }
 
@@ -260,10 +275,15 @@ export async function browserScreenshotAction(
     ref?: string;
     element?: string;
     type?: "png" | "jpeg";
+    timeoutMs?: number;
     profile?: string;
   },
 ): Promise<BrowserActionPathResult> {
   const q = buildProfileQuery(opts.profile);
+  const timeoutMs =
+    typeof opts.timeoutMs === "number" && Number.isFinite(opts.timeoutMs)
+      ? Math.max(1000, Math.min(120_000, Math.floor(opts.timeoutMs) + 5000))
+      : 40_000;
   return await fetchBrowserJson<BrowserActionPathResult>(withBaseUrl(baseUrl, `/screenshot${q}`), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -273,7 +293,8 @@ export async function browserScreenshotAction(
       ref: opts.ref,
       element: opts.element,
       type: opts.type,
+      timeoutMs: opts.timeoutMs,
     }),
-    timeoutMs: 20000,
+    timeoutMs,
   });
 }

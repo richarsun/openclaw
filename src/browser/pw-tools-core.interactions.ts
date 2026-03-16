@@ -9,6 +9,7 @@ import {
   restoreRoleRefsForTarget,
 } from "./pw-session.js";
 import {
+  isRetryablePlaywrightSessionError,
   normalizeTimeoutMs,
   requireRef,
   requireRefOrSelector,
@@ -24,6 +25,8 @@ type TargetOpts = {
 const MAX_CLICK_DELAY_MS = 5_000;
 const MAX_WAIT_TIME_MS = 30_000;
 const MAX_BATCH_ACTIONS = 100;
+const DEFAULT_WAIT_TIMEOUT_MS = 30_000;
+const DEFAULT_SCREENSHOT_TIMEOUT_MS = 30_000;
 
 function resolveBoundedDelayMs(value: number | undefined, label: string, maxMs: number): number {
   const normalized = Math.floor(value ?? 0);
@@ -41,6 +44,28 @@ async function getRestoredPageForTarget(opts: TargetOpts) {
   ensurePageState(page);
   restoreRoleRefsForTarget({ cdpUrl: opts.cdpUrl, targetId: opts.targetId, page });
   return page;
+}
+
+async function withRecoveredInteractionPage<T>(
+  opts: TargetOpts,
+  retryReason: string,
+  fn: (page: Awaited<ReturnType<typeof getRestoredPageForTarget>>) => Promise<T>,
+): Promise<T> {
+  let page = await getRestoredPageForTarget(opts);
+  try {
+    return await fn(page);
+  } catch (err) {
+    if (!isRetryablePlaywrightSessionError(err)) {
+      throw err;
+    }
+    await forceDisconnectPlaywrightForTarget({
+      cdpUrl: opts.cdpUrl,
+      targetId: opts.targetId,
+      reason: retryReason,
+    }).catch(() => {});
+    page = await getRestoredPageForTarget(opts);
+    return await fn(page);
+  }
 }
 
 function resolveInteractionTimeoutMs(timeoutMs?: number): number {
@@ -450,46 +475,47 @@ export async function waitForViaPlaywright(opts: {
   fn?: string;
   timeoutMs?: number;
 }): Promise<void> {
-  const page = await getPageForTargetId(opts);
-  ensurePageState(page);
-  const timeout = normalizeTimeoutMs(opts.timeoutMs, 20_000);
-
-  if (typeof opts.timeMs === "number" && Number.isFinite(opts.timeMs)) {
-    await page.waitForTimeout(resolveBoundedDelayMs(opts.timeMs, "wait timeMs", MAX_WAIT_TIME_MS));
-  }
-  if (opts.text) {
-    await page.getByText(opts.text).first().waitFor({
-      state: "visible",
-      timeout,
-    });
-  }
-  if (opts.textGone) {
-    await page.getByText(opts.textGone).first().waitFor({
-      state: "hidden",
-      timeout,
-    });
-  }
-  if (opts.selector) {
-    const selector = String(opts.selector).trim();
-    if (selector) {
-      await page.locator(selector).first().waitFor({ state: "visible", timeout });
+  const timeout = normalizeTimeoutMs(opts.timeoutMs, DEFAULT_WAIT_TIMEOUT_MS);
+  await withRecoveredInteractionPage(opts, "retry wait after disconnected page", async (page) => {
+    if (typeof opts.timeMs === "number" && Number.isFinite(opts.timeMs)) {
+      await page.waitForTimeout(
+        resolveBoundedDelayMs(opts.timeMs, "wait timeMs", MAX_WAIT_TIME_MS),
+      );
     }
-  }
-  if (opts.url) {
-    const url = String(opts.url).trim();
-    if (url) {
-      await page.waitForURL(url, { timeout });
+    if (opts.text) {
+      await page.getByText(opts.text).first().waitFor({
+        state: "visible",
+        timeout,
+      });
     }
-  }
-  if (opts.loadState) {
-    await page.waitForLoadState(opts.loadState, { timeout });
-  }
-  if (opts.fn) {
-    const fn = String(opts.fn).trim();
-    if (fn) {
-      await page.waitForFunction(fn, { timeout });
+    if (opts.textGone) {
+      await page.getByText(opts.textGone).first().waitFor({
+        state: "hidden",
+        timeout,
+      });
     }
-  }
+    if (opts.selector) {
+      const selector = String(opts.selector).trim();
+      if (selector) {
+        await page.locator(selector).first().waitFor({ state: "visible", timeout });
+      }
+    }
+    if (opts.url) {
+      const url = String(opts.url).trim();
+      if (url) {
+        await page.waitForURL(url, { timeout });
+      }
+    }
+    if (opts.loadState) {
+      await page.waitForLoadState(opts.loadState, { timeout });
+    }
+    if (opts.fn) {
+      const fn = String(opts.fn).trim();
+      if (fn) {
+        await page.waitForFunction(fn, { timeout });
+      }
+    }
+  });
 }
 
 export async function takeScreenshotViaPlaywright(opts: {
@@ -499,32 +525,50 @@ export async function takeScreenshotViaPlaywright(opts: {
   element?: string;
   fullPage?: boolean;
   type?: "png" | "jpeg";
+  timeoutMs?: number;
 }): Promise<{ buffer: Buffer }> {
-  const page = await getPageForTargetId(opts);
-  ensurePageState(page);
-  restoreRoleRefsForTarget({ cdpUrl: opts.cdpUrl, targetId: opts.targetId, page });
   const type = opts.type ?? "png";
+  const timeout = normalizeTimeoutMs(opts.timeoutMs, DEFAULT_SCREENSHOT_TIMEOUT_MS);
   if (opts.ref) {
     if (opts.fullPage) {
       throw new Error("fullPage is not supported for element screenshots");
     }
-    const locator = refLocator(page, opts.ref);
-    const buffer = await locator.screenshot({ type });
-    return { buffer };
+    return await withRecoveredInteractionPage(
+      opts,
+      "retry screenshot after disconnected page",
+      async (page) => {
+        const locator = refLocator(page, opts.ref!);
+        const buffer = await locator.screenshot({ type, timeout });
+        return { buffer };
+      },
+    );
   }
   if (opts.element) {
     if (opts.fullPage) {
       throw new Error("fullPage is not supported for element screenshots");
     }
-    const locator = page.locator(opts.element).first();
-    const buffer = await locator.screenshot({ type });
-    return { buffer };
+    return await withRecoveredInteractionPage(
+      opts,
+      "retry screenshot after disconnected page",
+      async (page) => {
+        const locator = page.locator(opts.element!).first();
+        const buffer = await locator.screenshot({ type, timeout });
+        return { buffer };
+      },
+    );
   }
-  const buffer = await page.screenshot({
-    type,
-    fullPage: Boolean(opts.fullPage),
-  });
-  return { buffer };
+  return await withRecoveredInteractionPage(
+    opts,
+    "retry screenshot after disconnected page",
+    async (page) => {
+      const buffer = await page.screenshot({
+        type,
+        fullPage: Boolean(opts.fullPage),
+        timeout,
+      });
+      return { buffer };
+    },
+  );
 }
 
 export async function screenshotWithLabelsViaPlaywright(opts: {

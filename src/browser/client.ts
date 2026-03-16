@@ -297,6 +297,7 @@ export async function browserSnapshot(
     frame?: string;
     labels?: boolean;
     mode?: "efficient";
+    timeoutMs?: number;
     profile?: string;
   },
 ): Promise<SnapshotResult> {
@@ -337,11 +338,18 @@ export async function browserSnapshot(
   if (opts.mode) {
     q.set("mode", opts.mode);
   }
+  if (typeof opts.timeoutMs === "number" && Number.isFinite(opts.timeoutMs)) {
+    q.set("timeoutMs", String(Math.floor(opts.timeoutMs)));
+  }
   if (opts.profile) {
     q.set("profile", opts.profile);
   }
+  const timeoutMs =
+    typeof opts.timeoutMs === "number" && Number.isFinite(opts.timeoutMs)
+      ? Math.max(1000, Math.min(120_000, Math.floor(opts.timeoutMs) + 5000))
+      : 40_000;
   return await fetchBrowserJson<SnapshotResult>(withBaseUrl(baseUrl, `/snapshot?${q.toString()}`), {
-    timeoutMs: 20000,
+    timeoutMs,
   });
 }
 

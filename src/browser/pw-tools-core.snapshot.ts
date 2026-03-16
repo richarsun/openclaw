@@ -21,6 +21,43 @@ import {
   type WithSnapshotForAI,
 } from "./pw-session.js";
 import { withPageScopedCdpClient } from "./pw-session.page-cdp.js";
+import { isRetryablePlaywrightSessionError, normalizeTimeoutMs } from "./pw-tools-core.shared.js";
+
+const DEFAULT_AI_SNAPSHOT_TIMEOUT_MS = 15_000;
+const DEFAULT_ROLE_ARIA_SNAPSHOT_TIMEOUT_MS = 15_000;
+
+async function withRecoveredSnapshotPage<T>(
+  opts: {
+    cdpUrl: string;
+    targetId?: string;
+    retryReason: string;
+  },
+  fn: (page: Awaited<ReturnType<typeof getPageForTargetId>>) => Promise<T>,
+): Promise<T> {
+  let page = await getPageForTargetId({
+    cdpUrl: opts.cdpUrl,
+    targetId: opts.targetId,
+  });
+  ensurePageState(page);
+  try {
+    return await fn(page);
+  } catch (err) {
+    if (!isRetryablePlaywrightSessionError(err)) {
+      throw err;
+    }
+    await forceDisconnectPlaywrightForTarget({
+      cdpUrl: opts.cdpUrl,
+      targetId: opts.targetId,
+      reason: opts.retryReason,
+    }).catch(() => {});
+    page = await getPageForTargetId({
+      cdpUrl: opts.cdpUrl,
+      targetId: opts.targetId,
+    });
+    ensurePageState(page);
+    return await fn(page);
+  }
+}
 
 export async function snapshotAriaViaPlaywright(opts: {
   cdpUrl: string;
@@ -56,42 +93,46 @@ export async function snapshotAiViaPlaywright(opts: {
   timeoutMs?: number;
   maxChars?: number;
 }): Promise<{ snapshot: string; truncated?: boolean; refs: RoleRefMap }> {
-  const page = await getPageForTargetId({
-    cdpUrl: opts.cdpUrl,
-    targetId: opts.targetId,
-  });
-  ensurePageState(page);
+  const timeout = normalizeTimeoutMs(opts.timeoutMs, DEFAULT_AI_SNAPSHOT_TIMEOUT_MS);
+  return await withRecoveredSnapshotPage(
+    {
+      cdpUrl: opts.cdpUrl,
+      targetId: opts.targetId,
+      retryReason: "retry snapshot after disconnected page",
+    },
+    async (page) => {
+      const maybe = page as unknown as WithSnapshotForAI;
+      if (!maybe._snapshotForAI) {
+        throw new Error("Playwright _snapshotForAI is not available. Upgrade playwright-core.");
+      }
 
-  const maybe = page as unknown as WithSnapshotForAI;
-  if (!maybe._snapshotForAI) {
-    throw new Error("Playwright _snapshotForAI is not available. Upgrade playwright-core.");
-  }
+      const result = await maybe._snapshotForAI({
+        timeout,
+        track: "response",
+      });
+      let snapshot = String(result?.full ?? "");
+      const maxChars = opts.maxChars;
+      const limit =
+        typeof maxChars === "number" && Number.isFinite(maxChars) && maxChars > 0
+          ? Math.floor(maxChars)
+          : undefined;
+      let truncated = false;
+      if (limit && snapshot.length > limit) {
+        snapshot = `${snapshot.slice(0, limit)}\n\n[...TRUNCATED - page too large]`;
+        truncated = true;
+      }
 
-  const result = await maybe._snapshotForAI({
-    timeout: Math.max(500, Math.min(60_000, Math.floor(opts.timeoutMs ?? 5000))),
-    track: "response",
-  });
-  let snapshot = String(result?.full ?? "");
-  const maxChars = opts.maxChars;
-  const limit =
-    typeof maxChars === "number" && Number.isFinite(maxChars) && maxChars > 0
-      ? Math.floor(maxChars)
-      : undefined;
-  let truncated = false;
-  if (limit && snapshot.length > limit) {
-    snapshot = `${snapshot.slice(0, limit)}\n\n[...TRUNCATED - page too large]`;
-    truncated = true;
-  }
-
-  const built = buildRoleSnapshotFromAiSnapshot(snapshot);
-  storeRoleRefsForTarget({
-    page,
-    cdpUrl: opts.cdpUrl,
-    targetId: opts.targetId,
-    refs: built.refs,
-    mode: "aria",
-  });
-  return truncated ? { snapshot, truncated, refs: built.refs } : { snapshot, refs: built.refs };
+      const built = buildRoleSnapshotFromAiSnapshot(snapshot);
+      storeRoleRefsForTarget({
+        page,
+        cdpUrl: opts.cdpUrl,
+        targetId: opts.targetId,
+        refs: built.refs,
+        mode: "aria",
+      });
+      return truncated ? { snapshot, truncated, refs: built.refs } : { snapshot, refs: built.refs };
+    },
+  );
 }
 
 export async function snapshotRoleViaPlaywright(opts: {
@@ -101,69 +142,74 @@ export async function snapshotRoleViaPlaywright(opts: {
   frameSelector?: string;
   refsMode?: "role" | "aria";
   options?: RoleSnapshotOptions;
+  timeoutMs?: number;
 }): Promise<{
   snapshot: string;
   refs: Record<string, { role: string; name?: string; nth?: number }>;
   stats: { lines: number; chars: number; refs: number; interactive: number };
 }> {
-  const page = await getPageForTargetId({
-    cdpUrl: opts.cdpUrl,
-    targetId: opts.targetId,
-  });
-  ensurePageState(page);
-
-  if (opts.refsMode === "aria") {
-    if (opts.selector?.trim() || opts.frameSelector?.trim()) {
-      throw new Error("refs=aria does not support selector/frame snapshots yet.");
-    }
-    const maybe = page as unknown as WithSnapshotForAI;
-    if (!maybe._snapshotForAI) {
-      throw new Error("refs=aria requires Playwright _snapshotForAI support.");
-    }
-    const result = await maybe._snapshotForAI({
-      timeout: 5000,
-      track: "response",
-    });
-    const built = buildRoleSnapshotFromAiSnapshot(String(result?.full ?? ""), opts.options);
-    storeRoleRefsForTarget({
-      page,
+  const timeout = normalizeTimeoutMs(opts.timeoutMs, DEFAULT_ROLE_ARIA_SNAPSHOT_TIMEOUT_MS);
+  return await withRecoveredSnapshotPage(
+    {
       cdpUrl: opts.cdpUrl,
       targetId: opts.targetId,
-      refs: built.refs,
-      mode: "aria",
-    });
-    return {
-      snapshot: built.snapshot,
-      refs: built.refs,
-      stats: getRoleSnapshotStats(built.snapshot, built.refs),
-    };
-  }
+      retryReason: "retry role snapshot after disconnected page",
+    },
+    async (page) => {
+      if (opts.refsMode === "aria") {
+        if (opts.selector?.trim() || opts.frameSelector?.trim()) {
+          throw new Error("refs=aria does not support selector/frame snapshots yet.");
+        }
+        const maybe = page as unknown as WithSnapshotForAI;
+        if (!maybe._snapshotForAI) {
+          throw new Error("refs=aria requires Playwright _snapshotForAI support.");
+        }
+        const result = await maybe._snapshotForAI({
+          timeout,
+          track: "response",
+        });
+        const built = buildRoleSnapshotFromAiSnapshot(String(result?.full ?? ""), opts.options);
+        storeRoleRefsForTarget({
+          page,
+          cdpUrl: opts.cdpUrl,
+          targetId: opts.targetId,
+          refs: built.refs,
+          mode: "aria",
+        });
+        return {
+          snapshot: built.snapshot,
+          refs: built.refs,
+          stats: getRoleSnapshotStats(built.snapshot, built.refs),
+        };
+      }
 
-  const frameSelector = opts.frameSelector?.trim() || "";
-  const selector = opts.selector?.trim() || "";
-  const locator = frameSelector
-    ? selector
-      ? page.frameLocator(frameSelector).locator(selector)
-      : page.frameLocator(frameSelector).locator(":root")
-    : selector
-      ? page.locator(selector)
-      : page.locator(":root");
+      const frameSelector = opts.frameSelector?.trim() || "";
+      const selector = opts.selector?.trim() || "";
+      const locator = frameSelector
+        ? selector
+          ? page.frameLocator(frameSelector).locator(selector)
+          : page.frameLocator(frameSelector).locator(":root")
+        : selector
+          ? page.locator(selector)
+          : page.locator(":root");
 
-  const ariaSnapshot = await locator.ariaSnapshot();
-  const built = buildRoleSnapshotFromAriaSnapshot(String(ariaSnapshot ?? ""), opts.options);
-  storeRoleRefsForTarget({
-    page,
-    cdpUrl: opts.cdpUrl,
-    targetId: opts.targetId,
-    refs: built.refs,
-    frameSelector: frameSelector || undefined,
-    mode: "role",
-  });
-  return {
-    snapshot: built.snapshot,
-    refs: built.refs,
-    stats: getRoleSnapshotStats(built.snapshot, built.refs),
-  };
+      const ariaSnapshot = await locator.ariaSnapshot();
+      const built = buildRoleSnapshotFromAriaSnapshot(String(ariaSnapshot ?? ""), opts.options);
+      storeRoleRefsForTarget({
+        page,
+        cdpUrl: opts.cdpUrl,
+        targetId: opts.targetId,
+        refs: built.refs,
+        frameSelector: frameSelector || undefined,
+        mode: "role",
+      });
+      return {
+        snapshot: built.snapshot,
+        refs: built.refs,
+        stats: getRoleSnapshotStats(built.snapshot, built.refs),
+      };
+    },
+  );
 }
 
 export async function navigateViaPlaywright(opts: {

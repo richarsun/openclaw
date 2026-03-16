@@ -17,6 +17,7 @@ export type BrowserSnapshotPlan = {
   labels?: boolean;
   limit?: number;
   resolvedMaxChars?: number;
+  timeoutMs?: number;
   interactive?: boolean;
   compact?: boolean;
   depth?: number;
@@ -50,6 +51,9 @@ export function resolveSnapshotPlan(params: {
     typeof maxCharsRaw === "number" && Number.isFinite(maxCharsRaw) && maxCharsRaw > 0
       ? Math.floor(maxCharsRaw)
       : undefined;
+  const timeoutMsRaw = toNumber(params.query.timeoutMs);
+  const timeoutMs =
+    typeof timeoutMsRaw === "number" && Number.isFinite(timeoutMsRaw) ? timeoutMsRaw : undefined;
   const resolvedMaxChars =
     format === "ai"
       ? hasMaxChars
@@ -77,6 +81,7 @@ export function resolveSnapshotPlan(params: {
     labels,
     limit,
     resolvedMaxChars,
+    timeoutMs,
     interactive,
     compact,
     depth,
