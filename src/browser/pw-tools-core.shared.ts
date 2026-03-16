@@ -48,6 +48,29 @@ export function normalizeTimeoutMs(timeoutMs: number | undefined, fallback: numb
   return Math.max(500, Math.min(120_000, timeoutMs ?? fallback));
 }
 
+const RETRYABLE_PLAYWRIGHT_SESSION_ERROR_PATTERNS = [
+  "frame has been detached",
+  "target page, context or browser has been closed",
+  "most likely the page has been closed",
+  "session closed",
+  "target closed",
+  "browser has disconnected",
+  "execution context was destroyed",
+  "connection closed",
+];
+
+export function isRetryablePlaywrightSessionError(error: unknown): boolean {
+  const message =
+    typeof error === "string"
+      ? error.toLowerCase()
+      : error instanceof Error
+        ? error.message.toLowerCase()
+        : "";
+  return RETRYABLE_PLAYWRIGHT_SESSION_ERROR_PATTERNS.some((pattern) =>
+    message.includes(pattern),
+  );
+}
+
 export function toAIFriendlyError(error: unknown, selector: string): Error {
   const message = error instanceof Error ? error.message : String(error);
 

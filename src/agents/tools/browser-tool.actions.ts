@@ -160,6 +160,10 @@ export async function executeSnapshotAction(params: {
   const targetId = typeof input.targetId === "string" ? input.targetId.trim() : undefined;
   const limit =
     typeof input.limit === "number" && Number.isFinite(input.limit) ? input.limit : undefined;
+  const timeoutMs =
+    typeof input.timeoutMs === "number" && Number.isFinite(input.timeoutMs)
+      ? Math.floor(input.timeoutMs)
+      : undefined;
   const maxChars =
     typeof input.maxChars === "number" && Number.isFinite(input.maxChars) && input.maxChars > 0
       ? Math.floor(input.maxChars)
@@ -200,9 +204,11 @@ export async function executeSnapshotAction(params: {
         path: "/snapshot",
         profile,
         query: snapshotQuery,
+        timeoutMs: timeoutMs ?? undefined,
       })) as Awaited<ReturnType<typeof browserSnapshot>>)
     : await browserSnapshot(baseUrl, {
         ...snapshotQuery,
+        timeoutMs: timeoutMs ?? undefined,
         profile,
       });
   if (snapshot.format === "ai") {
