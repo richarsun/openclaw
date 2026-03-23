@@ -1,6 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { withFetchPreconnect } from "../test-utils/fetch-mock.js";
-import { resolveFetch, wrapFetchWithAbortSignal } from "./fetch.js";
 
 async function waitForMicrotaskTurn(): Promise<void> {
   await new Promise<void>((resolve) => queueMicrotask(resolve));
@@ -43,7 +42,48 @@ function createThrowingCleanupSignalHarness(cleanupError: Error) {
   return { fakeSignal, removeEventListener };
 }
 
-describe("wrapFetchWithAbortSignal", () => {
+const undiciMocks = vi.hoisted(() => {
+  const fetch = vi.fn(async () => ({}) as Response);
+  const proxyAgentInstances: Array<{ proxyUrl: string }> = [];
+  class ProxyAgent {
+    proxyUrl: string;
+
+    constructor(proxyUrl: string) {
+      this.proxyUrl = proxyUrl;
+      proxyAgentInstances.push(this);
+    }
+  }
+
+  return {
+    fetch,
+    ProxyAgent,
+    proxyAgentInstances,
+  };
+});
+
+vi.mock("undici", () => undiciMocks);
+
+const originalFetch = globalThis.fetch;
+
+let installProxyFetchFromEnv: typeof import("./fetch.js").installProxyFetchFromEnv;
+let resolveFetch: typeof import("./fetch.js").resolveFetch;
+let wrapFetchWithAbortSignal: typeof import("./fetch.js").wrapFetchWithAbortSignal;
+
+beforeEach(async () => {
+  vi.resetModules();
+  undiciMocks.fetch.mockClear();
+  undiciMocks.proxyAgentInstances.length = 0;
+  globalThis.fetch = originalFetch;
+
+  ({ installProxyFetchFromEnv, resolveFetch, wrapFetchWithAbortSignal } =
+    await import("./fetch.js"));
+});
+
+afterEach(() => {
+  globalThis.fetch = originalFetch;
+});
+
+describe.sequential("wrapFetchWithAbortSignal", () => {
   it("adds duplex for requests with a body", async () => {
     let seenInit: RequestInit | undefined;
     const fetchImpl = withFetchPreconnect(
@@ -311,5 +351,70 @@ describe("resolveFetch", () => {
     } finally {
       vi.stubGlobal("fetch", previousFetch);
     }
+  });
+});
+
+describe.sequential("installProxyFetchFromEnv", () => {
+  it("noops when proxy env is missing", async () => {
+    const nativeFetch = vi.fn(async () => ({}) as Response);
+    globalThis.fetch = nativeFetch as unknown as typeof fetch;
+
+    installProxyFetchFromEnv({});
+
+    expect(globalThis.fetch).toBe(nativeFetch);
+    expect(undiciMocks.fetch).not.toHaveBeenCalled();
+    expect(undiciMocks.proxyAgentInstances).toHaveLength(0);
+  });
+
+  it("bypasses proxy for NO_PROXY and uses ProxyAgent otherwise", async () => {
+    const nativeFetch = vi.fn(async () => ({}) as Response);
+    globalThis.fetch = nativeFetch as unknown as typeof fetch;
+
+    installProxyFetchFromEnv({
+      https_proxy: "127.0.0.1:7890",
+      NO_PROXY: "example.com, localhost",
+    });
+
+    // NO_PROXY match -> native fetch
+    await globalThis.fetch("https://example.com/test");
+    expect(nativeFetch).toHaveBeenCalledOnce();
+    expect(undiciMocks.fetch).not.toHaveBeenCalled();
+
+    // not in NO_PROXY -> proxied fetch
+    await globalThis.fetch("https://openai.com/v1");
+    expect(nativeFetch).toHaveBeenCalledOnce();
+    expect(undiciMocks.fetch).toHaveBeenCalledOnce();
+    expect(undiciMocks.proxyAgentInstances).toHaveLength(1);
+    expect(undiciMocks.proxyAgentInstances[0]?.proxyUrl).toBe("http://127.0.0.1:7890");
+
+    const init = undiciMocks.fetch.mock.calls[0]?.[1] as Record<string, unknown> | undefined;
+    expect(init?.dispatcher).toBe(undiciMocks.proxyAgentInstances[0]);
+  });
+
+  it("bypasses loopback by default and chooses proxy by request protocol", async () => {
+    const nativeFetch = vi.fn(async () => ({}) as Response);
+    globalThis.fetch = nativeFetch as unknown as typeof fetch;
+
+    installProxyFetchFromEnv({
+      HTTP_PROXY: "http://http-proxy.local:8080",
+      HTTPS_PROXY: "http://https-proxy.local:8443",
+    });
+
+    await globalThis.fetch("http://127.0.0.1:3000/health");
+    await globalThis.fetch("http://[::1]:3000/health");
+    expect(nativeFetch).toHaveBeenCalledTimes(2);
+
+    await globalThis.fetch("http://example.com/plain");
+    await globalThis.fetch("https://example.com/secure");
+
+    expect(undiciMocks.fetch).toHaveBeenCalledTimes(2);
+    expect(undiciMocks.proxyAgentInstances).toHaveLength(2);
+    expect(undiciMocks.proxyAgentInstances[0]?.proxyUrl).toBe("http://http-proxy.local:8080");
+    expect(undiciMocks.proxyAgentInstances[1]?.proxyUrl).toBe("http://https-proxy.local:8443");
+
+    const httpInit = undiciMocks.fetch.mock.calls[0]?.[1] as Record<string, unknown> | undefined;
+    const httpsInit = undiciMocks.fetch.mock.calls[1]?.[1] as Record<string, unknown> | undefined;
+    expect(httpInit?.dispatcher).toBe(undiciMocks.proxyAgentInstances[0]);
+    expect(httpsInit?.dispatcher).toBe(undiciMocks.proxyAgentInstances[1]);
   });
 });
