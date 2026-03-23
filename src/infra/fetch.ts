@@ -1,3 +1,4 @@
+import { ProxyAgent, fetch as undiciFetch } from "undici";
 import { bindAbortRelay } from "../utils/fetch-timeout.js";
 
 type FetchWithPreconnect = typeof fetch & {
@@ -11,6 +12,8 @@ const wrapFetchWithAbortSignalMarker = Symbol.for("openclaw.fetch.abort-signal-w
 type FetchWithAbortSignalMarker = typeof fetch & {
   [wrapFetchWithAbortSignalMarker]?: true;
 };
+
+let proxyFetchInstalled = false;
 
 function withDuplex(
   init: RequestInit | undefined,
@@ -106,4 +109,131 @@ export function resolveFetch(fetchImpl?: typeof fetch): typeof fetch | undefined
     return undefined;
   }
   return wrapFetchWithAbortSignal(resolved);
+}
+
+function resolveProxyUrl(env: NodeJS.ProcessEnv): string | null {
+  const raw =
+    env.OPENCLAW_PROXY_URL?.trim() ||
+    env.https_proxy?.trim() ||
+    env.HTTPS_PROXY?.trim() ||
+    env.http_proxy?.trim() ||
+    env.HTTP_PROXY?.trim() ||
+    env.all_proxy?.trim() ||
+    env.ALL_PROXY?.trim();
+  if (!raw) {
+    return null;
+  }
+  return raw.includes("://") ? raw : `http://${raw}`;
+}
+
+function resolveFetchUrl(input: RequestInfo | URL): URL | null {
+  if (typeof input === "string") {
+    try {
+      return new URL(input);
+    } catch {
+      return null;
+    }
+  }
+  if (input instanceof URL) {
+    return input;
+  }
+  if (typeof Request !== "undefined" && input instanceof Request) {
+    try {
+      return new URL(input.url);
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+function parseNoProxyList(raw: string | undefined): string[] {
+  if (!raw) {
+    return [];
+  }
+  return raw
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+function shouldBypassProxy(url: URL, env: NodeJS.ProcessEnv): boolean {
+  const hostname = url.hostname.toLowerCase();
+  if (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1") {
+    return true;
+  }
+
+  const noProxy = parseNoProxyList(env.NO_PROXY ?? env.no_proxy);
+  if (noProxy.length === 0) {
+    return false;
+  }
+
+  for (const entryRaw of noProxy) {
+    const entry = entryRaw.toLowerCase();
+    if (entry === "*") {
+      return true;
+    }
+    const normalized = entry.replace(/:\\d+$/, "");
+    if (!normalized) {
+      continue;
+    }
+    if (normalized.startsWith(".")) {
+      if (hostname.endsWith(normalized)) {
+        return true;
+      }
+      continue;
+    }
+    if (hostname === normalized || hostname.endsWith(`.${normalized}`)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+export function installProxyFetchFromEnv(env: NodeJS.ProcessEnv = process.env): void {
+  if (proxyFetchInstalled) {
+    return;
+  }
+  const proxyUrl = resolveProxyUrl(env);
+  if (!proxyUrl) {
+    return;
+  }
+
+  const dispatcher = new ProxyAgent(proxyUrl);
+  const nativeFetch = globalThis.fetch;
+  const proxyFetch = ((input: RequestInfo | URL, init?: RequestInit) =>
+    undiciFetch(input as string | URL, {
+      ...((init as Record<string, unknown> | undefined) ?? {}),
+      dispatcher,
+    }) as unknown as Promise<Response>) as typeof fetch;
+
+  const combined = ((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = resolveFetchUrl(input);
+    if (url && url.protocol !== "http:" && url.protocol !== "https:") {
+      return nativeFetch ? nativeFetch(input, init) : proxyFetch(input, init);
+    }
+    if (url && shouldBypassProxy(url, env) && nativeFetch) {
+      return nativeFetch(input, init);
+    }
+    return proxyFetch(input, init);
+  }) as FetchWithPreconnect;
+
+  combined.preconnect = (url, init) => {
+    const resolved = resolveFetchUrl(url);
+    if (resolved && shouldBypassProxy(resolved, env) && nativeFetch) {
+      const nativeWithPreconnect = nativeFetch as FetchWithPreconnect;
+      if (typeof nativeWithPreconnect.preconnect === "function") {
+        nativeWithPreconnect.preconnect(url, init);
+        return;
+      }
+    }
+    const undiciWithPreconnect = undiciFetch as unknown as FetchWithPreconnect;
+    if (typeof undiciWithPreconnect.preconnect === "function") {
+      undiciWithPreconnect.preconnect(url, init);
+    }
+  };
+
+  globalThis.fetch = wrapFetchWithAbortSignal(combined);
+  proxyFetchInstalled = true;
 }

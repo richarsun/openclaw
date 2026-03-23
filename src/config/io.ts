@@ -13,6 +13,7 @@ import {
   shouldDeferShellEnvFallback,
   shouldEnableShellEnvFallback,
 } from "../infra/shell-env.js";
+import { installProxyFetchFromEnv } from "../infra/fetch.js";
 import { sanitizeTerminalText } from "../terminal/safe-text.js";
 import { VERSION } from "../version.js";
 import { DuplicateAgentDirError, findDuplicateAgentDirs } from "./agent-dirs.js";
@@ -744,6 +745,7 @@ export function createConfigIO(overrides: ConfigIoDeps = {}) {
             timeoutMs: resolveShellEnvFallbackTimeoutMs(deps.env),
           });
         }
+        installProxyFetchFromEnv(deps.env);
         return {};
       }
       const raw = deps.fs.readFileSync(configPath, "utf-8");
@@ -819,6 +821,7 @@ export function createConfigIO(overrides: ConfigIoDeps = {}) {
       }
 
       applyConfigEnvVars(cfg, deps.env);
+      installProxyFetchFromEnv(deps.env);
 
       const enabled = shouldEnableShellEnvFallback(deps.env) || cfg.env?.shellEnv?.enabled === true;
       if (enabled && !shouldDeferShellEnvFallback(deps.env)) {
