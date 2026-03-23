@@ -75,7 +75,8 @@ beforeEach(async () => {
   undiciMocks.proxyAgentInstances.length = 0;
   globalThis.fetch = originalFetch;
 
-  ({ installProxyFetchFromEnv, resolveFetch, wrapFetchWithAbortSignal } = await import("./fetch.js"));
+  ({ installProxyFetchFromEnv, resolveFetch, wrapFetchWithAbortSignal } =
+    await import("./fetch.js"));
 });
 
 afterEach(() => {
@@ -388,5 +389,32 @@ describe.sequential("installProxyFetchFromEnv", () => {
 
     const init = undiciMocks.fetch.mock.calls[0]?.[1] as Record<string, unknown> | undefined;
     expect(init?.dispatcher).toBe(undiciMocks.proxyAgentInstances[0]);
+  });
+
+  it("bypasses loopback by default and chooses proxy by request protocol", async () => {
+    const nativeFetch = vi.fn(async () => ({}) as Response);
+    globalThis.fetch = nativeFetch as unknown as typeof fetch;
+
+    installProxyFetchFromEnv({
+      HTTP_PROXY: "http://http-proxy.local:8080",
+      HTTPS_PROXY: "http://https-proxy.local:8443",
+    });
+
+    await globalThis.fetch("http://127.0.0.1:3000/health");
+    await globalThis.fetch("http://[::1]:3000/health");
+    expect(nativeFetch).toHaveBeenCalledTimes(2);
+
+    await globalThis.fetch("http://example.com/plain");
+    await globalThis.fetch("https://example.com/secure");
+
+    expect(undiciMocks.fetch).toHaveBeenCalledTimes(2);
+    expect(undiciMocks.proxyAgentInstances).toHaveLength(2);
+    expect(undiciMocks.proxyAgentInstances[0]?.proxyUrl).toBe("http://http-proxy.local:8080");
+    expect(undiciMocks.proxyAgentInstances[1]?.proxyUrl).toBe("http://https-proxy.local:8443");
+
+    const httpInit = undiciMocks.fetch.mock.calls[0]?.[1] as Record<string, unknown> | undefined;
+    const httpsInit = undiciMocks.fetch.mock.calls[1]?.[1] as Record<string, unknown> | undefined;
+    expect(httpInit?.dispatcher).toBe(undiciMocks.proxyAgentInstances[0]);
+    expect(httpsInit?.dispatcher).toBe(undiciMocks.proxyAgentInstances[1]);
   });
 });

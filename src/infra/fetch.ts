@@ -1,5 +1,6 @@
 import { ProxyAgent, fetch as undiciFetch } from "undici";
 import { bindAbortRelay } from "../utils/fetch-timeout.js";
+import { resolveEnvHttpProxyUrl } from "./net/proxy-env.js";
 
 type FetchWithPreconnect = typeof fetch & {
   preconnect: (url: string, init?: { credentials?: RequestCredentials }) => void;
@@ -111,19 +112,37 @@ export function resolveFetch(fetchImpl?: typeof fetch): typeof fetch | undefined
   return wrapFetchWithAbortSignal(resolved);
 }
 
-function resolveProxyUrl(env: NodeJS.ProcessEnv): string | null {
-  const raw =
-    env.OPENCLAW_PROXY_URL?.trim() ||
-    env.https_proxy?.trim() ||
-    env.HTTPS_PROXY?.trim() ||
-    env.http_proxy?.trim() ||
-    env.HTTP_PROXY?.trim() ||
-    env.all_proxy?.trim() ||
-    env.ALL_PROXY?.trim();
-  if (!raw) {
+function normalizeProxyUrl(raw: string | null | undefined): string | null {
+  const trimmed = raw?.trim();
+  if (!trimmed) {
     return null;
   }
-  return raw.includes("://") ? raw : `http://${raw}`;
+  return trimmed.includes("://") ? trimmed : `http://${trimmed}`;
+}
+
+function resolveAllProxyUrl(env: NodeJS.ProcessEnv): string | null {
+  if (typeof env.all_proxy === "string") {
+    return normalizeProxyUrl(env.all_proxy);
+  }
+  if (typeof env.ALL_PROXY === "string") {
+    return normalizeProxyUrl(env.ALL_PROXY);
+  }
+  return null;
+}
+
+function resolveProxyUrlForProtocol(
+  protocol: "http" | "https",
+  env: NodeJS.ProcessEnv,
+): string | null {
+  const override = normalizeProxyUrl(env.OPENCLAW_PROXY_URL);
+  if (override) {
+    return override;
+  }
+  const envProxyUrl = normalizeProxyUrl(resolveEnvHttpProxyUrl(protocol, env));
+  if (envProxyUrl) {
+    return envProxyUrl;
+  }
+  return resolveAllProxyUrl(env);
 }
 
 function resolveFetchUrl(input: RequestInfo | URL): URL | null {
@@ -159,7 +178,13 @@ function parseNoProxyList(raw: string | undefined): string[] {
 
 function shouldBypassProxy(url: URL, env: NodeJS.ProcessEnv): boolean {
   const hostname = url.hostname.toLowerCase();
-  if (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1") {
+  const normalizedHostname =
+    hostname.startsWith("[") && hostname.endsWith("]") ? hostname.slice(1, -1) : hostname;
+  if (
+    normalizedHostname === "localhost" ||
+    normalizedHostname === "127.0.0.1" ||
+    normalizedHostname === "::1"
+  ) {
     return true;
   }
 
@@ -178,12 +203,12 @@ function shouldBypassProxy(url: URL, env: NodeJS.ProcessEnv): boolean {
       continue;
     }
     if (normalized.startsWith(".")) {
-      if (hostname.endsWith(normalized)) {
+      if (normalizedHostname.endsWith(normalized) || `.${normalizedHostname}` === normalized) {
         return true;
       }
       continue;
     }
-    if (hostname === normalized || hostname.endsWith(`.${normalized}`)) {
+    if (normalizedHostname === normalized || normalizedHostname.endsWith(`.${normalized}`)) {
       return true;
     }
   }
@@ -195,36 +220,69 @@ export function installProxyFetchFromEnv(env: NodeJS.ProcessEnv = process.env): 
   if (proxyFetchInstalled) {
     return;
   }
-  const proxyUrl = resolveProxyUrl(env);
-  if (!proxyUrl) {
+  const fallbackProxyUrl =
+    resolveProxyUrlForProtocol("https", env) ?? resolveProxyUrlForProtocol("http", env);
+  if (!fallbackProxyUrl) {
     return;
   }
 
-  const dispatcher = new ProxyAgent(proxyUrl);
   const nativeFetch = globalThis.fetch;
-  const proxyFetch = ((input: RequestInfo | URL, init?: RequestInit) =>
+  const directFetch =
+    nativeFetch ??
+    ((input: RequestInfo | URL, init?: RequestInit) =>
+      undiciFetch(input as string | URL, {
+        ...((init as Record<string, unknown> | undefined) ?? {}),
+      }) as unknown as Promise<Response>);
+  const dispatchers = new Map<string, ProxyAgent>();
+  const resolveDispatcher = (proxyUrl: string): ProxyAgent => {
+    let dispatcher = dispatchers.get(proxyUrl);
+    if (!dispatcher) {
+      dispatcher = new ProxyAgent(proxyUrl);
+      dispatchers.set(proxyUrl, dispatcher);
+    }
+    return dispatcher;
+  };
+  const proxyFetch = (input: RequestInfo | URL, init: RequestInit | undefined, proxyUrl: string) =>
     undiciFetch(input as string | URL, {
       ...((init as Record<string, unknown> | undefined) ?? {}),
-      dispatcher,
-    }) as unknown as Promise<Response>) as typeof fetch;
+      dispatcher: resolveDispatcher(proxyUrl),
+    }) as unknown as Promise<Response>;
 
   const combined = ((input: RequestInfo | URL, init?: RequestInit) => {
     const url = resolveFetchUrl(input);
     if (url && url.protocol !== "http:" && url.protocol !== "https:") {
-      return nativeFetch ? nativeFetch(input, init) : proxyFetch(input, init);
+      return directFetch(input, init);
     }
-    if (url && shouldBypassProxy(url, env) && nativeFetch) {
-      return nativeFetch(input, init);
+    if (url && shouldBypassProxy(url, env)) {
+      return directFetch(input, init);
     }
-    return proxyFetch(input, init);
+    const proxyUrl = url
+      ? resolveProxyUrlForProtocol(url.protocol === "https:" ? "https" : "http", env)
+      : fallbackProxyUrl;
+    if (!proxyUrl) {
+      return directFetch(input, init);
+    }
+    return proxyFetch(input, init, proxyUrl);
   }) as FetchWithPreconnect;
 
   combined.preconnect = (url, init) => {
     const resolved = resolveFetchUrl(url);
-    if (resolved && shouldBypassProxy(resolved, env) && nativeFetch) {
-      const nativeWithPreconnect = nativeFetch as FetchWithPreconnect;
-      if (typeof nativeWithPreconnect.preconnect === "function") {
-        nativeWithPreconnect.preconnect(url, init);
+    const directWithPreconnect = directFetch as FetchWithPreconnect;
+    if (resolved && shouldBypassProxy(resolved, env)) {
+      if (typeof directWithPreconnect.preconnect === "function") {
+        directWithPreconnect.preconnect(url, init);
+      }
+      return;
+    }
+    if (resolved) {
+      const proxyUrl = resolveProxyUrlForProtocol(
+        resolved.protocol === "https:" ? "https" : "http",
+        env,
+      );
+      if (!proxyUrl) {
+        if (typeof directWithPreconnect.preconnect === "function") {
+          directWithPreconnect.preconnect(url, init);
+        }
         return;
       }
     }
