@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  DEACTIVATED_WORKSPACE_USER_MESSAGE,
   downgradeOpenAIFunctionCallReasoningPairs,
   downgradeOpenAIReasoningBlocks,
   isMessagingToolDuplicate,
@@ -71,6 +72,12 @@ describe("sanitizeUserFacingText", () => {
     const raw = '{"type":"error","error":{"message":"Something exploded","type":"server_error"}}';
     expect(sanitizeUserFacingText(raw, { errorContext: true })).toBe(
       "LLM error server_error: Something exploded",
+    );
+  });
+
+  it("在错误上下文中改写 Codex 工作区停用错误", () => {
+    expect(sanitizeUserFacingText("Error: deactivated_workspace", { errorContext: true })).toBe(
+      DEACTIVATED_WORKSPACE_USER_MESSAGE,
     );
   });
 

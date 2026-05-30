@@ -2,6 +2,7 @@ import type { AssistantMessage } from "@mariozechner/pi-ai";
 import { describe, expect, it } from "vitest";
 import {
   BILLING_ERROR_USER_MESSAGE,
+  DEACTIVATED_WORKSPACE_USER_MESSAGE,
   formatBillingErrorMessage,
   formatAssistantErrorText,
   formatRawAssistantErrorForUi,
@@ -107,6 +108,12 @@ describe("formatAssistantErrorText", () => {
     const result = formatAssistantErrorText(msg);
     expect(result).toContain("API provider");
     expect(result).toBe(BILLING_ERROR_USER_MESSAGE);
+  });
+  it("将 Codex 工作区停用错误改写为可操作提示", () => {
+    const msg = makeAssistantError(
+      '{"error":{"code":"deactivated_workspace","message":"workspace is deactivated"}}',
+    );
+    expect(formatAssistantErrorText(msg)).toBe(DEACTIVATED_WORKSPACE_USER_MESSAGE);
   });
   it("returns a friendly message for rate limit errors", () => {
     const msg = makeAssistantError("429 rate limit reached");

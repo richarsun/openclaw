@@ -7,6 +7,7 @@ import {
   isAuthErrorMessage,
   isAuthPermanentErrorMessage,
   isBillingErrorMessage,
+  isDeactivatedWorkspaceErrorMessage,
   isOverloadedErrorMessage,
   isPeriodicUsageLimitErrorMessage,
   isRateLimitErrorMessage,
@@ -19,6 +20,7 @@ export {
   isAuthErrorMessage,
   isAuthPermanentErrorMessage,
   isBillingErrorMessage,
+  isDeactivatedWorkspaceErrorMessage,
   isOverloadedErrorMessage,
   isRateLimitErrorMessage,
   isTimeoutErrorMessage,
@@ -38,6 +40,8 @@ export function formatBillingErrorMessage(provider?: string, model?: string): st
 }
 
 export const BILLING_ERROR_USER_MESSAGE = formatBillingErrorMessage();
+export const DEACTIVATED_WORKSPACE_USER_MESSAGE =
+  "OpenAI Codex 工作区已停用或不可用。请重新登录并选择可用的 ChatGPT 工作区，或临时切换到其他可用模型。";
 
 const RATE_LIMIT_ERROR_USER_MESSAGE = "⚠️ API rate limit reached. Please try again later.";
 const OVERLOADED_ERROR_USER_MESSAGE =
@@ -750,6 +754,10 @@ export function formatAssistantErrorText(
     return formatBillingErrorMessage(opts?.provider, opts?.model ?? msg.model);
   }
 
+  if (isDeactivatedWorkspaceErrorMessage(raw)) {
+    return DEACTIVATED_WORKSPACE_USER_MESSAGE;
+  }
+
   if (isLikelyHttpErrorText(raw) || isRawApiErrorPayload(raw)) {
     return formatRawAssistantErrorForUi(raw);
   }
@@ -791,6 +799,10 @@ export function sanitizeUserFacingText(text: string, opts?: { errorContext?: boo
 
     if (isBillingErrorMessage(trimmed)) {
       return BILLING_ERROR_USER_MESSAGE;
+    }
+
+    if (isDeactivatedWorkspaceErrorMessage(trimmed)) {
+      return DEACTIVATED_WORKSPACE_USER_MESSAGE;
     }
 
     if (isRawApiErrorPayload(trimmed) || isLikelyHttpErrorText(trimmed)) {

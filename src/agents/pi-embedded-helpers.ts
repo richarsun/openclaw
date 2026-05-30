@@ -11,6 +11,7 @@ export {
 } from "./pi-embedded-helpers/bootstrap.js";
 export {
   BILLING_ERROR_USER_MESSAGE,
+  DEACTIVATED_WORKSPACE_USER_MESSAGE,
   formatBillingErrorMessage,
   classifyFailoverReason,
   classifyFailoverReasonFromHttpStatus,
@@ -26,6 +27,7 @@ export {
   parseApiErrorInfo,
   sanitizeUserFacingText,
   isBillingErrorMessage,
+  isDeactivatedWorkspaceErrorMessage,
   isCloudflareOrHtmlErrorPage,
   isCloudCodeAssistFormatError,
   isCompactionFailureError,

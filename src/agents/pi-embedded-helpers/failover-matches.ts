@@ -68,6 +68,9 @@ const ERROR_PATTERNS = {
     "key has been disabled",
     "key has been revoked",
     "account has been deactivated",
+    "deactivated_workspace",
+    "deactivated workspace",
+    "workspace is deactivated",
     /could not (?:authenticate|validate).*(?:api[_ ]?key|credentials)/i,
     "permission_error",
     "not allowed for this organization",
@@ -159,6 +162,18 @@ export function isBillingErrorMessage(raw: string): boolean {
 
 export function isAuthPermanentErrorMessage(raw: string): boolean {
   return matchesErrorPatterns(raw, ERROR_PATTERNS.authPermanent);
+}
+
+export function isDeactivatedWorkspaceErrorMessage(raw: string): boolean {
+  if (!raw) {
+    return false;
+  }
+  const value = raw.toLowerCase();
+  return (
+    value.includes("deactivated_workspace") ||
+    value.includes("deactivated workspace") ||
+    value.includes("workspace is deactivated")
+  );
 }
 
 export function isAuthErrorMessage(raw: string): boolean {
